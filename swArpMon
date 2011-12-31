@@ -1,0 +1,214 @@
+#!/usr/bin/perl -w
+
+# swArpMon - Switch ARP Monitor
+# EnderUNIX SDT @ Turkey
+# Author: Ozkan KIRIK (ozkan ~ enderunix.org)
+
+use SNMP;
+
+$VERSION="0.1";
+
+if (@ARGV) { # is there any commandline arguments?
+	if ($ARGV[0] eq "-v") {
+		print "swArpMon - Switch ARP Monitor\n";
+		print "Version	: $VERSION\n";
+		print "Team	: EnderUNIX SDT @ Turkey (http://www.enderunix.org)\n";
+		print "Author	: Ozkan KIRIK\n";
+		print "Email	: ozkan\@enderunix.org\n";
+		print "WWW	: http://www.enderunix.org/swarpmon\n";
+		exit 0;
+	} elsif ($ARGV[0] eq "-V") {
+		$verbose="yes";
+	} else {
+		print "Switch ARP Monitor v$VERSION\n";
+		print "http://www.enderunix.org/swarpmon\n";
+		print "\n";
+		print "swArpMon, checks switchs that defined by managedb, against MAC Table changes.\n";
+		print "Changes are reported to administrator by email.\n";
+		print "\n";
+		print "Usage:\n";
+		print "	swArpMon [-v|-h|--help]\n";
+		print "\n";
+		print "	-v	Show version info\n";
+		print "	-V	Verbose mode\n";
+		print "	-h	Show this help screen\n";
+		print "\n";
+		exit 1;
+	}
+}
+
+$dbdir="/usr/local/share/swArpMon";
+my @dblines="";
+my @conflines="";
+
+if (open($conffd, "/usr/local/etc/swArpMon.conf")) { # Open conf file
+	@conflines=<$conffd>;
+	close($conffd);
+} else {
+	print STDERR "Couldn't open /usr/local/etc/swArpMon.conf\n";
+	exit 1;
+}
+
+foreach $key (@conflines) {
+	my @data = split(/=/,$key);
+	$variable = shift(@data);
+	if ($variable && $variable eq "mailto") {
+		$mailto = shift(@data);
+		$mailto =~ s/\n//;
+	} elsif ($variable && $variable eq "mailfrom") {
+		$mailfrom = shift(@data);
+		$mailfrom =~ s/\n//;
+	}
+}
+
+if (!$mailto || !$mailfrom) {
+	print STDERR "Syntax error in config file\n";
+	print STDERR "mailto or/and mailfrom variables not defined\n";
+	exit 1;
+}
+
+if ($verbose) { print "Configuration loaded.\n"}
+
+if (open($dbfd, "$dbdir/switch.db")) { # Open switch db
+	@dblines=<$dbfd>;
+	close($dbfd);
+	if ($verbose) { print "Switch database loaded.\n\n"}
+} else {
+	print STDERR "Couldn't open switch database, please run: managedb\n";
+	exit 1;
+}
+
+foreach $key (@dblines) {
+	my @data = split(/\|/,$key);
+
+	my $host	= shift(@data);
+	my $descr	= shift(@data);
+	my $community	= shift(@data);
+	$community	=~ s/\n//;
+
+	#print "$host, $descr, $community\n";
+
+	# hash init
+	my @if_key;
+	my @mac;
+	my %ifno = ();
+
+	# create session
+	$session = new SNMP::Session ( DestHost => $host, Community => $community , Version => 1, UseNumeric => 1);
+
+	$var = [['.1.3.6.1.2.1.1.1.0']]; # SysDescr
+	if ($verbose) { print "Connecting to $host ... "}
+	if (! (@cevap=$session->get($var))) {
+		print "Unable to connect host $host\n";
+		print "Error: $session->{ErrorStr}\n";
+		next;
+	}
+	$sysdescr="@cevap";
+	if ($verbose) { print "Connected\nDevice is $sysdescr\n"; }
+
+	# start queries
+	$start_oid = '.1.3.6.1.2.1.17.4.3.1.1'; # mac db
+	$var = [[$start_oid]]; # getnext function requires this format
+	$i=0; # counter
+
+	if ($verbose) {print "Retrieving MAC Table... "}
+	$|=1;
+	$|=0;
+	# walk for macdb
+	for (@cevap=$session->getnext($var); $var->[0]->[0] =~ /^$start_oid/ && not $session->{ErrorStr} ;@cevap=$session->getnext($var) ) {
+		my $key=$var->[0]->[0];
+		$key =~ s/^$start_oid// ;
+		$if_key[$i] = "$key";
+		$mac[$i] = "@cevap";
+		$i++;
+	}
+	undef $key;
+	if ($verbose) {print "Done\n"}
+
+
+	$start_oid = '.1.3.6.1.2.1.17.4.3.1.2'; # ifnumber
+	$var = [[$start_oid]];
+	my $unfetched=0;
+
+	if ($verbose) {print "Retrieving interface numbers... "}
+	$|=1;
+	$|=0;
+	# walk for ifnumber
+	for (@cevap=$session->getnext($var); $var->[0]->[0] =~ /^$start_oid/ && not $session->{ErrorStr} ;@cevap=$session->getnext($var) ) { 
+		my $key=$var->[0]->[0];
+		$key =~ s/^$start_oid// ;
+		$ifno{$key} = "@cevap";
+	}
+	undef $key;
+
+
+	for ($key=0; $key<$i; $key++) {  # Convert Mac Address to Hex, and create macdb hash.
+		@asc=unpack('C*',$mac[$key]);
+		$mac_addr = sprintf("%2lx-%2lx-%2lx-%2lx-%2lx-%2lx",$asc[0],$asc[1],$asc[2],$asc[3],$asc[4],$asc[5]);
+		$mac_addr =~ s/\ /0/g;
+		$macdb{$mac_addr}=$ifno{$if_key[$key]};
+		if (! $macdb{$mac_addr}) {
+			$macdb{$mac_addr} = "Unknown";
+			$unfetched++;
+		}
+	}
+	if ($verbose) {
+		if ($unfetched==0) {print "Done\n"
+		} else { print "Unable to fetch $unfetched interfaces.\n" }
+	}
+
+
+	if (open($macdbfd,"$dbdir/$host.db")) { # Open host's mac database
+		my @dblines=<$macdbfd>;
+		close($macdbfd);
+
+		foreach $key (@dblines) {
+			my @data = split(/\|/, $key);
+			$mac  = shift(@data);
+			$ifno = shift(@data);
+			$ifno =~  s/\n//;
+			$macdb_infile{$mac} = $ifno;
+		}
+	} else {
+		%macdb_infile=();
+	}
+
+	my $message=""; # Email Body
+
+	foreach $key (keys(%macdb)) { # compare new records and old records
+		if (!$macdb_infile{$key}) {
+			$message = "$message$key plugged to port $macdb{$key}.\n";
+		} elsif ($macdb_infile{$key}!=$macdb{$key}) {
+			$message = "$message$key was moved from $macdb_infile{$key} to $macdb{$key}. port.\n";
+			delete($macdb_infile{$key});
+		} else {
+			delete($macdb_infile{$key});
+		}
+	}
+
+	foreach $key (keys(%macdb_infile)) {
+		$message = "$message$key was removed from $macdb_infile{$key}. port.\n";
+	}
+
+	open($macdbfd,"> $dbdir/$host.db"); # write new records
+	foreach $key (keys(%macdb)) {
+		print $macdbfd $key, "|", $macdb{$key}, "\n";
+	}
+	close($macdbfd);
+
+	if ($message) { # Email changes
+		$message="Device Description = $sysdescr\n$message"; # Email Body
+		open ($mailfd,"| sendmail $mailto");
+		print $mailfd "To: $mailto\n";
+		print $mailfd "Subject: $descr ($host) status report\n";
+		print $mailfd "From: $mailfrom\n";
+		print $mailfd "X-Mailer: swArpMon v$VERSION\n";
+		print $mailfd "\n";
+		print $mailfd $message;
+		close($mailfd);
+		if ($verbose) {print "$message\n" }
+		print "Report sent to $mailto\n";
+	}
+
+	undef $session;
+}

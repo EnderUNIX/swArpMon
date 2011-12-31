@@ -1,0 +1,344 @@
+#!/usr/bin/perl -w
+#
+# test.pl -- Curses::Application test script
+#
+# (c) 2001, Arthur Corliss <corliss@digitalmages.com>
+#
+# $Id: managedb,v 1.1.1.1 2005/09/15 08:13:48 ozkan Exp $
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+
+use strict;
+use vars qw($VERSION);
+use Curses::Application;
+
+
+# Initialization
+my @records = ();
+my $add_yes = "";
+my $dbfile = "/usr/local/share/swArpMon/switch.db";
+my $dbfd; # database file descriptor
+
+# Open dbfile
+if (-e "$dbfile") {
+	open($dbfd, "$dbfile");
+	my @dblines=<$dbfd>;
+	close($dbfd);
+	my $key = "";
+
+	# push records to array
+	foreach $key (@dblines) {
+		my @data	= split(/\|/, $key);
+		my $ipaddr	= shift(@data);
+		my $descr	= shift(@data);
+		my $community	= shift(@data);
+		push(@records,  "$descr, $ipaddr"=> {
+				Descr	=> $descr,
+				IPAddr	=> $ipaddr,
+				Community => $community,
+			},
+		);
+	};
+} else { # $dbfile not exist
+	open($dbfd, "> $dbfile");
+	close($dbfd);
+	$add_yes="yes"; # Call add new record
+}
+my %records = @records;
+
+# Set up the environment
+my $app = Curses::Application->new({
+  FOREGROUND    => 'white',
+  BACKGROUND    => 'blue',
+  BORDERCOL	=> 'green',
+  CAPTIONCOL    => 'yellow',
+  TITLEBAR      => 1,
+  CAPTION       => "swArpMon - Switch ARP Monitor",
+  MAINFORM      => { Main  => 'MainFrm' },
+  INPUTFUNC     => \&myscankey,
+  });
+my ($rv, $f, $w);
+
+# Program starts here
+# Draw the main screen
+$app->draw;
+
+# Create the MainFrm early, since we need to adjust a few parameters
+# of the ListBox and Label
+$app->createForm(qw(Main MainFrm));
+$w = $app->getForm('Main')->getWidget('Switch');
+$w->setField(
+  LINES       => ($app->maxyx)[0] - 10,
+  LISTITEMS   => [map { [split(', ', $_)] } keys %records],
+  );
+
+
+if ($add_yes eq "yes" || scalar(%records) eq "0") {
+	dialog("No Records Found", BTN_OK, "No Records Found\nSwitching to New Switch Section", qw(white red yellow) );
+	$app->createForm('AddRec', 'AddRecFrm');
+	$app->execForm('AddRec');
+	$app->delForm('AddRec');
+}
+undef $add_yes;
+
+# Start the input loop
+$app->execute;
+
+exit 0;
+
+# Subroutines
+sub myscankey {
+  my $mwh = shift;
+  my $key = -1;
+
+  while ($key eq -1) {
+    $key = $mwh->getch
+  };
+  if ($key eq chr(27) || $key eq "271" ) { # <ESC> , <F7>
+  	exit;
+  } elsif ($key eq "269") { # <F5>
+  	main::showaddrec();
+  } elsif ($key eq "270") { # <F6>
+  	main::delrec();
+  }
+  return $key;
+
+}
+
+sub quit {
+  $rv = dialog('Quit Application?', BTN_YES | BTN_NO, 
+    'Are you sure you want to quit?', qw(white red yellow));
+  exit 0 unless ($rv);
+}
+
+sub displayrec {
+  my $f = shift;
+  my $key = shift;
+  my ($w, $list, $rec, @items);
+
+  return unless $key =~ /[\n ]/;
+
+  # Get the list box widget to retrieve the select record
+  $w = $f->getWidget('Switch');
+  @items = @{$w->getField('LISTITEMS')};
+  $rec = $items[$w->getField('CURSORPOS')];
+  $rec = join(', ', @$rec[0,1]);
+
+  # Update the form's record fields
+  foreach (keys %{$records{$rec}}) {
+     $w = $f->getWidget($_);
+     $w->setField(VALUE => $records{$rec}{$_});
+  }
+
+  # Set the form's DONTSWITCH directive to keep the focus where it is
+  $f->setField(DONTSWITCH => 1);
+}
+
+sub delrec {
+  my $f = $app->getForm('Main');
+  my $w = $f->getWidget('Switch');
+  my $rec = ${$w->getField('LISTITEMS')}[$w->getField('CURSORPOS')];
+
+  $rv = dialog('Remove Switch?', BTN_YES | BTN_NO, 
+    "@$rec[0] \(@$rec[1]\) will be removed.\n Are you sure?", qw(white red yellow));
+
+  if (! $rv) {
+	# Delete the record from the hash and list box
+	delete $records{join(', ', @$rec[0,1])};
+	$w->setField(
+	  LISTITEMS => [map { [split(', ', $_)] } keys %records]);
+	rebuilddb(); 
+  };
+  if (scalar(%records) eq "0") {
+	dialog("No Records Left", BTN_OK, "No Records Left\nSwitching to New Switch Section", qw(white red yellow) );
+	main::showaddrec();
+  };
+  # Reset the form fields
+  resetfields($f);
+}
+
+sub showaddrec {
+  $app->createForm('AddRec', 'AddRecFrm');
+  $app->execForm('AddRec');
+  $app->delForm('AddRec');
+}
+
+sub resetfields {
+  my $f = shift;
+
+  # Reset the displayed record field
+  foreach (qw(Descr IPAddr Community)) {
+    $f->getWidget($_)->setField(VALUE => '') };
+}
+
+sub addbtns {
+  my $f = shift;
+  my $key = shift;
+  my @fields = qw(Descr IPAddr Community);
+  my %rec;
+
+  return unless $key =~ /[\n ]/;
+
+  # Close the dialog if the user canceled
+  if ($f->getWidget('Buttons')->getField('VALUE') == 1) {
+    $f->setField(EXIT => 1);
+    return;
+  }
+
+  # Get the field values
+  foreach (@fields) { $rec{$_} = $f->getWidget($_)->getField('VALUE') };
+
+  # Make sure there's a first and last name
+  unless ($rec{Descr} && $rec{IPAddr} && $rec{Community}) {
+    dialog('Error!', BTN_OK, "\n All Fields are Required!\n\n",
+      qw(white red yellow));
+    return;
+  }
+
+  unless ($rec{IPAddr} =~ /^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/) {
+  	dialog('Error!', BTN_OK, "\nInvalid IP Address Format", qw(white red yellow));
+	return;
+  }
+
+  # Save the record and set the dialog to close
+  $records{join(', ', @rec{qw(Descr IPAddr)})} = { %rec };
+  $f->setField(EXIT => 1);
+
+  # Update the list box on the main form
+  $f = $app->getForm('Main');
+  $f->getWidget('Switch')->setField(
+    LISTITEMS => [map { [split(', ', $_)] } keys %records]);
+
+  rebuilddb();
+  # Reset the form fields
+  resetfields($f);
+}
+
+sub rebuilddb {
+	if (! open($dbfd, "> $dbfile")) {
+		exit;
+	}
+	my $key="";
+	
+	foreach $key (keys %records) {
+		$records{$key}{IPAddr} =~ s/\n//g;
+		$records{$key}{Descr} =~ s/\n//g;
+		$records{$key}{Community} =~ s/\n//g;
+		print ($dbfd "$records{$key}{IPAddr}|$records{$key}{Descr}|$records{$key}{Community}\n");
+	}
+	close($dbfd);
+}
+
+__DATA__
+
+%forms = (
+  MainFrm     => {
+    TABORDER        => [qw(Switch)],
+    FOCUSED         => 'Switch',
+    WIDGETS         => {
+      Switch          => {
+        TYPE            => 'ListBox::MultiColumn',
+        LISTITEMS       => [],
+        COLUMNS         => 40,
+        LINES           => 10,
+        Y               => 2,
+        X               => 2,
+        COLWIDTHS       => [24, 15],
+        HEADERS         => [qw(Description IP-Address)],
+        BIGHEADER       => 1,
+        CAPTION         => 'Switch Database',
+        FOCUSSWITCH     => "\t\n ",
+        OnExit          => \&main::displayrec,
+        },
+      Descr		=> {
+        TYPE            => 'TextField',
+        Y               => 2,
+        X               => 50,
+        CAPTION         => 'Switch Description',
+        COLUMNS         => 25,
+        },
+      IPAddr		=> {
+        TYPE            => 'TextField',
+        Y               => 6,
+        X               => 50,
+        CAPTION         => 'IP Address',
+        COLUMNS         => 15,
+        },
+      Community		=> {
+        TYPE            => 'TextField',
+        Y               => 10,
+        X               => 50,
+        CAPTION         => 'SNMP Community',
+        COLUMNS         => 15,
+        },
+      Message		=> {
+      	TYPE		=> 'Label',
+	CENTER		=> 1,
+	COLUMNS		=> 28,
+	LINES		=> 4,
+	ALIGNMENT	=> 'C',
+	Y		=> 15,
+	X		=> 48,
+	VALUE		=> "<F5> = Add New Switch\n<F6> = Remove  Switch\n<ESC>, <F7> = Quit"
+	},
+      },
+    },
+  AddRecFrm   => {
+    DERIVED         => 0,
+    FOREGROUND      => 'white',
+    BACKGROUND      => 'blue',
+    AUTOCENTER      => 1,
+    BORDER          => 1,
+    LINES           => 13,
+    COLUMNS         => 39,
+    CAPTION         => 'New Switch',
+    TABORDER        => [qw(Descr IPAddr Community Buttons)],
+    FOCUSED         => 'Descr',
+    WIDGETS         => {
+      Buttons         => {
+        TYPE            => 'ButtonSet',
+        Y               => 9,
+        X               => 8,
+        LABELS          => [qw(OK Cancel)],
+        OnExit          => \&main::addbtns,
+        },
+      Descr		=> {
+        TYPE            => 'TextField',
+        Y               => 1,
+        X               => 1,
+        CAPTION         => 'Switch Description',
+        CAPTIONCOL      => 'yellow',
+        COLUMNS         => 35,
+        },
+      IPAddr		=> {
+        TYPE            => 'TextField',
+        Y               => 5,
+        X               => 1,
+        CAPTION         => 'Switch IP Address',
+        COLUMNS         => 17,
+        },
+      Community		=> {
+        TYPE            => 'TextField',
+        Y               => 5,
+        X               => 21,
+        CAPTION         => 'SNMP Community',
+        COLUMNS         => 15,
+        VALUE		=> 'public',
+        },
+      },
+    },
+  );
+

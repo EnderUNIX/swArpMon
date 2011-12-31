@@ -1,0 +1,44 @@
+swArpMon - Switch ARP Monitor
+EnderUNIX Software Development Team @ Turkey
+
+swArpMon monitors switch MAC Table changes.
+It consists of two tools:
+
+1) managedb
+	This tool manages switch database. It can add/remove switchs.
+
+2) swArpMon
+	This tool checks switchs' MAC Table changes using SNMP v1.
+	Changes are reported to administrator by email.
+
+Dependencies:
+	swArpMon needs softwares below to work:
+	- Perl 5.8 or Higher
+	- p5-Curses-Application
+	- Net-SNMP
+
+
+Configuration:
+	You should edit /usr/local/etc/swArpMon.conf. 
+	Please update mailto and mailfrom variables.
+	
+	To work swArpMon properly, please add following line to crontab
+
+	*/5 * * * * /usr/local/bin/swArpMon
+
+Usage:
+	First of all, you should define your switchs using:
+		/usr/local/bin/managedb
+
+	To check switchs in database, run:
+		/usr/local/bin/swArpMon
+	If you added a new switch to database, this tool will report
+	that switch's mac table to administrator.
+
+
+swArpMon - Switch ARP Monitor
+Version	: 0.1
+Team	: EnderUNIX SDT @ Turkey (http://www.enderunix.org)
+Author	: Ozkan KIRIK
+Email	: ozkan@enderunix.org
+WWW	: http://www.enderunix.org/swarpmon
